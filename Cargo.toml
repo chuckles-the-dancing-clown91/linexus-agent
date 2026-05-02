@@ -1,0 +1,22 @@
+[package]
+name = "linexus-agent"
+version = "0.1.0"
+edition = "2024"
+authors = ["Linexus Collective"]
+description = "Edge Data Plane — IoT telemetry, sensor providers, local SQLite cache, offline resilience"
+license = "MIT"
+repository = "https://github.com/chuckles-the-dancing-clown91/linexus-agent"
+
+[dependencies]
+linexus-core = { git = "https://github.com/chuckles-the-dancing-clown91/linexus-core.git", branch = "main" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.13"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
