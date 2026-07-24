@@ -120,19 +120,30 @@ func handleTask(cli *nexus.Client, agentID string, t nexus.Task, cfg config.Conf
 	for _, step := range t.Plan.Steps {
 		r := executor.ExecuteStep(step, executor.Options{AllowDestructive: cfg.AllowDestructive})
 		level := "info"
+		outcome := "ok"
+		if r.Changed {
+			outcome = "changed"
+		} else if r.OK {
+			outcome = "unchanged"
+		}
 		if !r.OK {
 			level = "error"
+			outcome = "failed"
 			ok = false
 			if firstErr == "" {
 				firstErr = r.Err
 			}
 		}
 		logs = append(logs, nexus.LogEntry{
-			Level:    level,
-			Source:   "agent",
-			Message:  fmt.Sprintf("%s: %s", r.Action, firstNonEmpty(r.Output, r.Err, "ok")),
-			TaskID:   t.TaskID,
-			Metadata: map[string]any{"stepId": r.StepID, "action": r.Action},
+			Level:   level,
+			Source:  "agent",
+			Message: fmt.Sprintf("%s [%s]: %s", r.Action, outcome, firstNonEmpty(r.Output, r.Err, "ok")),
+			TaskID:  t.TaskID,
+			Metadata: map[string]any{
+				"stepId":  r.StepID,
+				"action":  r.Action,
+				"changed": r.Changed,
+			},
 		})
 		if !r.OK && step.Critical {
 			break
