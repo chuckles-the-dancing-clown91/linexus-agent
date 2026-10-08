@@ -7,6 +7,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,10 @@ type StepResult struct {
 	Changed bool // whether the step actually mutated state
 	Output  string
 	Err     string
+	// ExitCode is the failing command's exit status when the step ran one
+	// and it exited non-zero; otherwise 1 for a failed step and 0 for a
+	// successful one.
+	ExitCode int
 }
 
 // ExecuteStep runs a single plan step and returns its result. It never panics;
@@ -56,7 +61,24 @@ func ExecuteStep(step nexus.Step, opts Options) StepResult {
 	}
 	res.StepID = step.ID
 	res.Action = step.Action
+	if !res.OK && res.ExitCode == 0 {
+		res.ExitCode = 1
+	}
 	return res
+}
+
+// exitCodeOf returns a process's exit status from the error its run returned:
+// the status for a command that exited non-zero, 1 for any other failure
+// (not found, killed by a signal), 0 for no error.
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() > 0 {
+		return ee.ExitCode()
+	}
+	return 1
 }
 
 func runCommandStep(step nexus.Step) StepResult {
@@ -73,6 +95,7 @@ func runCommandStep(step nexus.Step) StepResult {
 	if err != nil {
 		res.OK = false
 		res.Err = err.Error()
+		res.ExitCode = exitCodeOf(err)
 	}
 	return res
 }

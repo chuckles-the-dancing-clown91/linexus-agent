@@ -36,6 +36,40 @@ The agent implements the action verbs the orchestrator emits
 
 A failed **critical** step aborts the rest of the plan.
 
+## Reporting a result
+
+When a task's plan has run, the agent posts one result to
+`POST /api/v1/agents/{id}/tasks/{taskId}/result`:
+
+```json
+{
+  "status": "failed",
+  "error": "exit status 3",
+  "message": "executed deploy (3 steps)",
+  "exitCode": 3,
+  "output": "==> file.write [success]\nwrote /etc/app.env\n==> command.run [failed]\n...\nerror: exit status 3",
+  "steps": [
+    {"id": "s1", "action": "file.write",     "status": "success", "changed": true,  "output": "wrote /etc/app.env", "error": ""},
+    {"id": "s2", "action": "command.run",    "status": "failed",  "changed": true,  "output": "...",                "error": "exit status 3"},
+    {"id": "s3", "action": "service.ensure", "status": "skipped", "changed": false, "output": "",                   "error": ""}
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `success` when every step that ran succeeded, else `failed` |
+| `error` | the first failing step's error (omitted on success) |
+| `message` | one-line summary |
+| `exitCode` | `0` when every **critical** step succeeded; otherwise the first failing critical step's exit code — the command's exit status for `command.run`, `1` for anything else. A non-critical failure makes `status` `failed` but leaves `exitCode` at `0` |
+| `output` | each step's output (and error) under a `==> action [status]` header, in plan order; capped at 64 KiB, keeping the tail behind a `[... truncated N bytes ...]` marker |
+| `steps` | one entry per planned step, in order: `status` is `success`, `failed`, or `skipped` (not run because an earlier critical step failed); `output` is capped at 16 KiB and `error` at 4 KiB, the same way |
+
+`status`, `error` and `message` are the original protocol; `exitCode`, `output`
+and `steps` were added for Nexus's `GET /api/v1/tasks/{id}` and are optional on
+its side, so an older Nexus ignores them. Each step's outcome is also shipped
+as a log line (`POST /api/v1/agents/{id}/logs`) before the result is posted.
+
 ## Configuration (environment)
 
 | Var | Default | Meaning |

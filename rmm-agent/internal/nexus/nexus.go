@@ -135,7 +135,42 @@ func (c *Client) PollTasks(id string) ([]Task, error) {
 	return tasks, err
 }
 
-// ReportResult records a terminal task result. `status` is "success" or "failed".
+// StepReport is one plan step's outcome inside a Result. Status is "success",
+// "failed", or "skipped" (a step never run because an earlier critical step
+// failed).
+type StepReport struct {
+	ID      string `json:"id,omitempty"`
+	Action  string `json:"action"`
+	Status  string `json:"status"`
+	Changed bool   `json:"changed"`
+	Output  string `json:"output"`
+	Error   string `json:"error"`
+}
+
+// Result is the body of a task result report. Status, Error and Message are
+// the original protocol; ExitCode, Output and Steps were added later and are
+// optional on the Nexus side, so an older Nexus simply ignores them.
+type Result struct {
+	Status   string       `json:"status"` // "success" or "failed"
+	Error    string       `json:"error,omitempty"`
+	Message  string       `json:"message,omitempty"`
+	ExitCode int          `json:"exitCode"`
+	Output   string       `json:"output"`
+	Steps    []StepReport `json:"steps"`
+}
+
+// SendResult records a terminal task result with its exit code, combined
+// output and per-step results.
+func (c *Client) SendResult(id, taskID string, r Result) error {
+	if r.Steps == nil {
+		r.Steps = []StepReport{}
+	}
+	return c.do(http.MethodPost, "/api/v1/agents/"+id+"/tasks/"+taskID+"/result", r, nil)
+}
+
+// ReportResult records a terminal task result in the original, minimal form
+// (no exit code, output or steps). `status` is "success" or "failed".
+// Prefer SendResult.
 func (c *Client) ReportResult(id, taskID, status, errMsg, message string) error {
 	body := map[string]any{"status": status}
 	if errMsg != "" {

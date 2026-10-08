@@ -17,6 +17,7 @@ import (
 	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/executor"
 	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/facts"
 	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/nexus"
+	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/report"
 	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/state"
 )
 
@@ -109,16 +110,17 @@ func runCycle(cli *nexus.Client, agentID string, cfg config.Config) {
 }
 
 // handleTask executes a task's plan, shipping a log line per step and reporting
-// the terminal result. A failed critical step aborts the remaining steps.
+// the terminal result with per-step outcomes. A failed critical step aborts
+// the remaining steps, which are reported as skipped.
 func handleTask(cli *nexus.Client, agentID string, t nexus.Task, cfg config.Config) {
 	log.Printf("task %s intent=%s steps=%d", t.TaskID, t.Intent, len(t.Plan.Steps))
 
 	logs := make([]nexus.LogEntry, 0, len(t.Plan.Steps))
-	ok := true
-	firstErr := ""
+	results := make([]executor.StepResult, 0, len(t.Plan.Steps))
 
 	for _, step := range t.Plan.Steps {
 		r := executor.ExecuteStep(step, executor.Options{AllowDestructive: cfg.AllowDestructive})
+		results = append(results, r)
 		level := "info"
 		outcome := "ok"
 		if r.Changed {
@@ -129,10 +131,6 @@ func handleTask(cli *nexus.Client, agentID string, t nexus.Task, cfg config.Conf
 		if !r.OK {
 			level = "error"
 			outcome = "failed"
-			ok = false
-			if firstErr == "" {
-				firstErr = r.Err
-			}
 		}
 		logs = append(logs, nexus.LogEntry{
 			Level:   level,
@@ -154,15 +152,11 @@ func handleTask(cli *nexus.Client, agentID string, t nexus.Task, cfg config.Conf
 		log.Printf("ship logs: %v", err)
 	}
 
-	status := "success"
-	if !ok {
-		status = "failed"
-	}
-	msg := fmt.Sprintf("executed %s (%d steps)", t.Intent, len(t.Plan.Steps))
-	if err := cli.ReportResult(agentID, t.TaskID, status, firstErr, msg); err != nil {
+	res := report.Build(t.Intent, t.Plan.Steps, results)
+	if err := cli.SendResult(agentID, t.TaskID, res); err != nil {
 		log.Printf("report result: %v", err)
 	}
-	log.Printf("task %s -> %s", t.TaskID, status)
+	log.Printf("task %s -> %s (exit %d)", t.TaskID, res.Status, res.ExitCode)
 }
 
 func firstNonEmpty(vals ...string) string {
