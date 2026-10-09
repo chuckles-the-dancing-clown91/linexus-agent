@@ -2,9 +2,13 @@
 #
 # Installed by Nexus's install script (GET $NEXUS_PUBLIC_URL/install/agent.sh)
 # as /etc/systemd/system/linexus-agent.service. Configuration lives in
-# /etc/linexus/agent.env (NEXUS_URL, ENROLLMENT_TOKEN, AGENT_STATE_FILE, …);
-# the agent's identity and per-agent credential in
-# /var/lib/linexus/agent-state.json (0600).
+# /etc/linexus/agent.env (0600) — NEXUS_URL, ENROLLMENT_TOKEN,
+# AGENT_STATE_FILE, and the trust settings the installer writes:
+# LINEXUS_SIGNING_PUBKEY (Nexus's plan-signing key; unsigned or foreign plans
+# are refused) and LINEXUS_CA_FILE (the CA behind Nexus's certificate), plus
+# optional LINEXUS_CLIENT_CERT/LINEXUS_CLIENT_KEY for mTLS. The agent's
+# identity, per-agent credential, enrollment-pinned signing key and replay
+# record live in /var/lib/linexus/agent-state.json (0600).
 #
 # The agent runs as root on purpose: managing packages, services, BIND and
 # mounts is its job. Destructive power actions stay off unless

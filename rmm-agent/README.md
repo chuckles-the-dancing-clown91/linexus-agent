@@ -27,6 +27,13 @@ downloads `rmm-agent-linux-<amd64|arm64>` from `$NEXUS/install/` to
 Re-running it upgrades the binary and keeps the agent's identity. Logs:
 `journalctl -u linexus-agent -f`.
 
+The script Nexus renders also writes the two trust settings into
+`/etc/linexus/agent.env`: `LINEXUS_SIGNING_PUBKEY` (the key Nexus signs plans
+with) and, for a Nexus behind a private CA, `LINEXUS_CA_FILE` — see
+[Trust: signed plans and TLS](#trust-signed-plans-and-tls). The unit reads that
+same file (`EnvironmentFile=/etc/linexus/agent.env`), so anything added there
+takes effect on `systemctl restart linexus-agent`.
+
 By hand: copy a binary to `/usr/local/bin/linexus-agent`, write
 `/etc/linexus/agent.env`, copy the unit to `/etc/systemd/system/`, then
 `systemctl daemon-reload && systemctl enable --now linexus-agent`.
@@ -39,14 +46,16 @@ Nexus is the only service the agent talks to. It:
    hostgroup, machineId, enrollmentToken}` and **no bearer** when
    `ENROLLMENT_TOKEN` is set (the legacy path sends no token in the body and
    `AGENT_TOKEN`, a Nexus system key, as the bearer). Nexus answers with the
-   agent id and a per-agent `nxa_…` credential; both go into the state file
+   agent id, a per-agent `nxa_…` credential and its plan-signing public key
+   (`signingKey`); all three go into the state file
    and the credential is the bearer for every later call. `machineId`
    (`/etc/machine-id`, else `/var/lib/dbus/machine-id`) lets Nexus re-adopt a
    reinstalled host under its old agent id. Enrollment retries with backoff
    (up to every 5 min) until it succeeds.
 2. **Reports facts** at start and every `AGENT_FACTS_INTERVAL` (see below).
 3. **Heartbeats** for liveness.
-4. **Polls** Nexus for tasks targeting it and **executes** each plan step.
+4. **Polls** Nexus for tasks targeting it, **verifies** each task's signed
+   envelope, and **executes** the signed plan's steps.
 5. **Ships logs and reports the result** back through Nexus (which relays logs to
    the Logger and updates task status). Daedalus IT then sees live health and the
    task's journal.
@@ -68,12 +77,88 @@ agent, remove the state file, put a fresh `ENROLLMENT_TOKEN` in
   "agentToken": "nxa_…",
   "enrollmentTokenId": "…",
   "hostgroup": "acme",
-  "environment": {"environment": "production", "monitored": true, "note": "", "updatedAt": "…"}
+  "environment": {"environment": "production", "monitored": true, "note": "", "updatedAt": "…"},
+  "signingKey": {"alg": "ed25519", "keyId": "…", "publicKey": "<base64>"},
+  "executedTasks": ["0192…", "…"]
 }
 ```
 
 Agents enrolled before per-agent credentials have only `agentId` and keep
-using `AGENT_TOKEN` as their bearer.
+using `AGENT_TOKEN` as their bearer. `signingKey` is the key pinned at
+enrollment; `executedTasks` holds the last 1 000 executed task ids (replay
+protection).
+
+## Trust: signed plans and TLS
+
+The agent runs plans as root, so it does not take Nexus's word on the wire
+for them.
+
+### Signed plans
+
+Nexus holds an Ed25519 key. Each task it hands out carries, beside the plain
+`plan`, an envelope:
+
+```json
+"envelope": {"alg": "ed25519", "keyId": "…", "payload": "<base64>", "signature": "<base64>"}
+```
+
+`payload` decodes to UTF-8 JSON
+`{"v":1,"taskId","agentId","intent","plan","issuedAt","expiresAt","nonce"}`
+and `signature` is Ed25519 over exactly those bytes. Before running anything
+the agent checks, in order: the signature against the **pinned** key;
+`v == 1`; `agentId` is its own id; `taskId` is the task it was delivered as;
+`expiresAt` has not passed (5 minutes of clock skew allowed); and the task id
+is not among the recently executed ones. It then records the task as executed
+and runs **`payload.plan` only** — the unsigned `plan` field is never
+executed.
+
+A task that fails any check is not run. It is reported through the normal
+routes — an `error` log line and a `failed` result with `exitCode` 1, every
+step `skipped`, and `error` set to `signature verification failed: <reason>`
+(e.g. `bad signature`, `plan expired at …`, `task … was already executed
+(replay)`) — so the operator sees it on the task.
+
+**Which key is pinned**, highest precedence first:
+
+1. `LINEXUS_SIGNING_PUBKEY` (base64) in the environment — the installer
+   writes it into `/etc/linexus/agent.env`;
+2. the key saved in the state file;
+3. the `signingKey` of the enrollment answer, saved to the state file at
+   enrollment.
+
+When `LINEXUS_SIGNING_PUBKEY` is set and Nexus advertises a different key
+(`GET /api/v1/signing-key`, checked before the enrollment token is spent, and
+the enrollment answer), the agent **refuses to enroll** and exits with an
+error naming both keys. At start it also compares the pin with what Nexus
+advertises and warns about a mismatch (a rotated key) without changing the
+pin. To follow a key rotation, put the new key in
+`LINEXUS_SIGNING_PUBKEY` (re-running the installer does this) and restart.
+
+**Unsigned tasks** (no `envelope`) are refused whenever a key is pinned. With
+no key pinned at all — an agent enrolled against a Nexus too old to sign —
+they are refused too, unless `LINEXUS_ALLOW_UNSIGNED=1`, which logs a loud
+warning at start and on every unsigned task. Remove it once Nexus signs.
+
+**Upgrading from 0.2.** An agent enrolled before Nexus signed plans has no
+key in its state file, so after the upgrade it refuses every task until a key
+is pinned. Re-run the installer Nexus serves (it writes
+`LINEXUS_SIGNING_PUBKEY`, keeps the identity and restarts the agent), or add
+`LINEXUS_SIGNING_PUBKEY=…` to `/etc/linexus/agent.env` by hand and
+`systemctl restart linexus-agent`. The agent logs the key Nexus advertises at
+start to make that easy to check.
+
+### TLS
+
+| Var | Meaning |
+|---|---|
+| `LINEXUS_CA_FILE` | PEM bundle trusted for Nexus's certificate, **added to** the system roots |
+| `LINEXUS_CA_ONLY` | `1`: trust `LINEXUS_CA_FILE` **alone**, not the system roots |
+| `LINEXUS_CLIENT_CERT` / `LINEXUS_CLIENT_KEY` | PEM client certificate and key presented to Nexus (mTLS); set both or neither |
+| `LINEXUS_ALLOW_INSECURE` | `1`: allow a plain `http://` `NEXUS_URL` to a non-loopback host (labs only) |
+
+`NEXUS_URL` must be `https://`, or `http://` to a loopback host
+(`localhost`, `127.0.0.0/8`, `::1`); anything else stops the agent at start
+unless `LINEXUS_ALLOW_INSECURE=1`. TLS 1.2 is the minimum.
 
 ### Facts
 
@@ -226,13 +311,20 @@ as a log line (`POST /api/v1/agents/{id}/logs`) before the result is posted.
 | `AGENT_BIND_*` | _(per distro)_ | BIND paths and commands, see [DNS](#dns-bind) |
 | `AGENT_ALLOW_DESTRUCTIVE` | `false` | Permit reboot/power actions |
 | `AGENT_ONCE` | `false` | Run a single cycle then exit (testing / one-shot) |
+| `LINEXUS_SIGNING_PUBKEY` | _(none)_ | Nexus's plan-signing Ed25519 public key (base64); wins over the key saved at enrollment. See [Signed plans](#signed-plans) |
+| `LINEXUS_ALLOW_UNSIGNED` | `false` | Run unsigned plans while no key is pinned (a Nexus too old to sign) |
+| `LINEXUS_CA_FILE` | _(none)_ | PEM CA bundle for Nexus's certificate, added to the system roots |
+| `LINEXUS_CA_ONLY` | `false` | Trust only `LINEXUS_CA_FILE` |
+| `LINEXUS_CLIENT_CERT` / `LINEXUS_CLIENT_KEY` | _(none)_ | mTLS client certificate and key |
+| `LINEXUS_ALLOW_INSECURE` | `false` | Allow `http://` to a non-loopback Nexus |
 
 ## Build & run
 
 ```sh
 make                 # go vet + go test + ./rmm-agent for this host
 make dist            # dist/rmm-agent-linux-amd64, dist/rmm-agent-linux-arm64, SHA256SUMS
-ENROLLMENT_TOKEN=nxe_… NEXUS_URL=https://nexus.internal ./rmm-agent
+ENROLLMENT_TOKEN=nxe_… NEXUS_URL=https://nexus.internal \
+  LINEXUS_SIGNING_PUBKEY=<publicKey from GET /api/v1/signing-key, checked out of band> ./rmm-agent
 ```
 
 Stdlib only — no external dependencies; binaries are static
