@@ -5,6 +5,7 @@ package nexus
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/plansig"
 )
 
 type Client struct {
@@ -23,15 +26,27 @@ type Client struct {
 	token string
 }
 
-// New builds a client. The transport disables proxying: the agent reaches Nexus
-// directly (LAN/VPN), never through an outbound web proxy.
+// New builds a client with Go's default TLS settings (system roots, no
+// client certificate). The transport disables proxying: the agent reaches
+// Nexus directly (LAN/VPN), never through an outbound web proxy.
 func New(baseURL, token string) *Client {
+	return NewTLS(baseURL, token, nil)
+}
+
+// NewTLS builds a client that verifies Nexus (and presents a client
+// certificate) per tlsCfg; nil means Go's defaults.
+func NewTLS(baseURL, token string, tlsCfg *tls.Config) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		hc: &http.Client{
-			Timeout:   15 * time.Second,
-			Transport: &http.Transport{Proxy: nil},
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				Proxy:               nil,
+				TLSClientConfig:     tlsCfg,
+				TLSHandshakeTimeout: 10 * time.Second,
+				ForceAttemptHTTP2:   true,
+			},
 		},
 	}
 }
@@ -91,6 +106,9 @@ type Agent struct {
 	AgentToken        string `json:"agentToken"`
 	EnrollmentTokenID string `json:"enrollmentTokenId"`
 	Readopted         bool   `json:"readopted"`
+	// SigningKey is the public key Nexus signs plans with; absent from an
+	// older Nexus.
+	SigningKey *plansig.Key `json:"signingKey,omitempty"`
 }
 
 // Identity is the agent id, whichever field carried it.
@@ -118,12 +136,28 @@ type Plan struct {
 	Steps        []Step   `json:"steps"`
 }
 
-// Task is one unit of work handed to the agent.
+// Task is one unit of work handed to the agent. Plan is the unsigned copy,
+// kept for display and for an old Nexus; a signing Nexus adds Envelope, whose
+// payload carries the plan the agent actually executes.
 type Task struct {
-	TaskID string `json:"taskId"`
-	Intent string `json:"intent"`
-	Status string `json:"status"`
-	Plan   Plan   `json:"plan"`
+	TaskID   string            `json:"taskId"`
+	Intent   string            `json:"intent"`
+	Status   string            `json:"status"`
+	Plan     Plan              `json:"plan"`
+	Envelope *plansig.Envelope `json:"envelope,omitempty"`
+}
+
+// DecodePlan parses a plan as carried in a signed payload: the
+// TransactionPlan object, or (tolerated) a bare array of steps.
+func DecodePlan(raw json.RawMessage) (Plan, error) {
+	var p Plan
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		err := json.Unmarshal(trimmed, &p.Steps)
+		return p, err
+	}
+	err := json.Unmarshal(trimmed, &p)
+	return p, err
 }
 
 // LogEntry is one journal line shipped back through Nexus to the Logger.
@@ -185,6 +219,21 @@ func (c *Client) Enroll(req EnrollRequest) (Agent, error) {
 		err = fmt.Errorf("nexus enroll: answer carried no agent id")
 	}
 	return a, err
+}
+
+// SigningKey fetches the public key Nexus signs plans with
+// (GET /api/v1/signing-key, no auth). It is informational: the agent pins a
+// key from its environment or its enrollment, never from this call.
+func (c *Client) SigningKey() (plansig.Key, error) {
+	var k plansig.Key
+	err := c.doAuth(http.MethodGet, "/api/v1/signing-key", "", nil, &k)
+	return k, err
+}
+
+// IsNotFound reports whether err is a 404 from Nexus.
+func IsNotFound(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusNotFound
 }
 
 // Report submits a facts payload (also a heartbeat).

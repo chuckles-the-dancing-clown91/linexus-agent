@@ -11,7 +11,9 @@
 //	  "agentToken": "nxa_…",
 //	  "enrollmentTokenId": "…",
 //	  "hostgroup": "acme",
-//	  "environment": {"environment": "production", "monitored": true, "note": "", "updatedAt": "…"}
+//	  "environment": {"environment": "production", "monitored": true, "note": "", "updatedAt": "…"},
+//	  "signingKey": {"alg": "ed25519", "keyId": "…", "publicKey": "<base64>"},
+//	  "executedTasks": ["<task id>", …]
 //	}
 package state
 
@@ -20,7 +22,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/plansig"
 )
+
+// MaxExecuted bounds the remembered executed task ids (replay protection).
+// Signed plans expire within minutes, so the most recent ids are the ones
+// that matter.
+const MaxExecuted = 1000
 
 // Environment is what an operator told this agent it is (the agent.environment
 // step). Monitored=false mutes periodic facts reports.
@@ -47,6 +56,33 @@ type State struct {
 	// Environment is nil until an operator (or enrollment) assigned one; a
 	// nil environment is treated as tracked production.
 	Environment *Environment `json:"environment,omitempty"`
+	// SigningKey is the Nexus plan-signing public key pinned at enrollment
+	// (LINEXUS_SIGNING_PUBKEY in the environment takes precedence).
+	SigningKey *plansig.Key `json:"signingKey,omitempty"`
+	// ExecutedTasks are the most recently executed task ids, oldest first,
+	// at most MaxExecuted — a signed task is never executed twice.
+	ExecutedTasks []string `json:"executedTasks,omitempty"`
+}
+
+// HasExecuted reports whether the task id is among the recently executed.
+func (s State) HasExecuted(taskID string) bool {
+	for _, id := range s.ExecutedTasks {
+		if id == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkExecuted records a task id, keeping only the newest MaxExecuted.
+func (s *State) MarkExecuted(taskID string) {
+	if taskID == "" || s.HasExecuted(taskID) {
+		return
+	}
+	s.ExecutedTasks = append(s.ExecutedTasks, taskID)
+	if n := len(s.ExecutedTasks) - MaxExecuted; n > 0 {
+		s.ExecutedTasks = append([]string(nil), s.ExecutedTasks[n:]...)
+	}
 }
 
 // Monitored reports whether periodic facts should be shipped. Anything but an

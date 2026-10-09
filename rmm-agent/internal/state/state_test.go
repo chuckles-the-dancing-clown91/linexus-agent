@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,5 +83,27 @@ func TestEnvironmentSameIgnoresTimestamp(t *testing.T) {
 	b.Note = "x"
 	if a.Same(b) {
 		t.Error("note should matter")
+	}
+}
+
+func TestMarkExecutedIsBoundedAndDeduped(t *testing.T) {
+	var s State
+	for i := 0; i < MaxExecuted+5; i++ {
+		s.MarkExecuted(fmt.Sprintf("t%d", i))
+	}
+	s.MarkExecuted("t10") // already present: not added again
+	if len(s.ExecutedTasks) != MaxExecuted {
+		t.Fatalf("len = %d, want %d", len(s.ExecutedTasks), MaxExecuted)
+	}
+	if s.HasExecuted("t4") || !s.HasExecuted("t5") || !s.HasExecuted(fmt.Sprintf("t%d", MaxExecuted+4)) {
+		t.Errorf("oldest ids should be evicted first: first=%s", s.ExecutedTasks[0])
+	}
+	p := filepath.Join(t.TempDir(), "state.json")
+	if err := Save(p, s); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(p)
+	if err != nil || len(out.ExecutedTasks) != MaxExecuted || !out.HasExecuted("t5") {
+		t.Fatalf("round trip: len=%d err=%v", len(out.ExecutedTasks), err)
 	}
 }

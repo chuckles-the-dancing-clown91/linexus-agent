@@ -146,3 +146,37 @@ func TestUnauthorizedIsDetectable(t *testing.T) {
 		t.Error("SetToken did not take")
 	}
 }
+
+func TestPollDecodesEnvelopeAndEnrollDecodesSigningKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agents/a1/tasks":
+			_, _ = w.Write([]byte(`[{"taskId":"t1","intent":"x","status":"planned","plan":{"steps":[]},
+				"envelope":{"alg":"ed25519","keyId":"k1","payload":"cA==","signature":"cw=="}}]`))
+		default:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"agentId":"a1","agentToken":"nxa_t","signingKey":{"alg":"ed25519","keyId":"k1","publicKey":"AAAA"}}`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "")
+	tasks, err := c.PollTasks("a1")
+	if err != nil || len(tasks) != 1 || tasks[0].Envelope == nil || tasks[0].Envelope.KeyID != "k1" || tasks[0].Envelope.Payload != "cA==" {
+		t.Fatalf("tasks = %+v err=%v", tasks, err)
+	}
+	a, err := c.Enroll(EnrollRequest{Hostname: "h", EnrollmentToken: "nxe"})
+	if err != nil || a.SigningKey == nil || a.SigningKey.KeyID != "k1" || a.SigningKey.PublicKey != "AAAA" {
+		t.Fatalf("agent = %+v err=%v", a, err)
+	}
+}
+
+func TestDecodePlanObjectOrSteps(t *testing.T) {
+	p, err := DecodePlan([]byte(`{"task_id":"t1","intent":"i","steps":[{"id":"s1","action":"command.run","critical":true}]}`))
+	if err != nil || p.TaskID != "t1" || len(p.Steps) != 1 || !p.Steps[0].Critical {
+		t.Fatalf("object: %+v %v", p, err)
+	}
+	p, err = DecodePlan([]byte(` [{"id":"s1","action":"agent.facts"}]`))
+	if err != nil || len(p.Steps) != 1 || p.Steps[0].Action != "agent.facts" {
+		t.Fatalf("array: %+v %v", p, err)
+	}
+}

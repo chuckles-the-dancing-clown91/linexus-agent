@@ -40,6 +40,25 @@ type Config struct {
 	// Once runs a single enroll→report→poll→execute cycle then exits. Useful
 	// for testing and one-shot invocations.
 	Once bool
+
+	// SigningPubKey pins Nexus's plan-signing Ed25519 public key (base64,
+	// LINEXUS_SIGNING_PUBKEY). It wins over the key saved at enrollment.
+	SigningPubKey string
+	// AllowUnsigned lets the agent run unsigned plans while no signing key is
+	// pinned — only for a Nexus too old to sign (LINEXUS_ALLOW_UNSIGNED=1).
+	AllowUnsigned bool
+	// CAFile is a PEM bundle trusted for Nexus's certificate, added to the
+	// system roots, or used alone with CAOnly (LINEXUS_CA_FILE,
+	// LINEXUS_CA_ONLY).
+	CAFile string
+	CAOnly bool
+	// ClientCert/ClientKey: an mTLS client certificate presented to Nexus
+	// (LINEXUS_CLIENT_CERT, LINEXUS_CLIENT_KEY).
+	ClientCert string
+	ClientKey  string
+	// AllowInsecure permits a plain-http NEXUS_URL to a non-loopback host
+	// (LINEXUS_ALLOW_INSECURE=1).
+	AllowInsecure bool
 }
 
 func Load() Config {
@@ -54,6 +73,13 @@ func Load() Config {
 		FactsInterval:     envDur("AGENT_FACTS_INTERVAL", 5*time.Minute),
 		AllowDestructive:  envBool("AGENT_ALLOW_DESTRUCTIVE", false),
 		Once:              envBool("AGENT_ONCE", false),
+		SigningPubKey:     os.Getenv("LINEXUS_SIGNING_PUBKEY"),
+		AllowUnsigned:     envBool("LINEXUS_ALLOW_UNSIGNED", false),
+		CAFile:            os.Getenv("LINEXUS_CA_FILE"),
+		CAOnly:            envBool("LINEXUS_CA_ONLY", false),
+		ClientCert:        os.Getenv("LINEXUS_CLIENT_CERT"),
+		ClientKey:         os.Getenv("LINEXUS_CLIENT_KEY"),
+		AllowInsecure:     envBool("LINEXUS_ALLOW_INSECURE", false),
 	}
 }
 

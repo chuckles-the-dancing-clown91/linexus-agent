@@ -117,3 +117,16 @@ func TestCapKeepsUTF8Boundary(t *testing.T) {
 		t.Error("short input must pass through")
 	}
 }
+
+func TestRefusedFailsAndSkipsEveryStep(t *testing.T) {
+	r := Refused("deploy", plan(true, false), "signature verification failed: bad signature")
+	if r.Status != "failed" || r.ExitCode != 1 || r.Error != "signature verification failed: bad signature" {
+		t.Errorf("result = %+v", r)
+	}
+	if len(r.Steps) != 2 || r.Steps[0].Status != StepSkipped || r.Steps[1].Status != StepSkipped {
+		t.Errorf("steps = %+v", r.Steps)
+	}
+	if !strings.Contains(r.Output, "bad signature") {
+		t.Errorf("output = %q", r.Output)
+	}
+}
