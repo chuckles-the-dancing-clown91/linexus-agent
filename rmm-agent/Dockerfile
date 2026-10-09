@@ -2,7 +2,7 @@
 # not in a container — this image is for demos and for hosts that run it in a
 # privileged container with host mounts (hence no USER drop: managing the host
 # is the job).
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/rmm-agent .

@@ -1,5 +1,8 @@
 //! # Linexus Agent — The Edge Data Plane
 
+// Solar and biodigester readers are stubs (zeroed readings) that the edge
+// loop does not call yet; keep them compiling without failing -D warnings.
+#[allow(dead_code)]
 mod providers;
 mod cache;
 mod environment;
