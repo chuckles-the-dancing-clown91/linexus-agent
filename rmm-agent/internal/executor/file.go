@@ -105,7 +105,7 @@ func applyOwner(path, owner, group string, res *StepResult) {
 	if group != "" {
 		spec = owner + ":" + group
 	}
-	if out, err := runPrivileged("chown", spec, path); err != nil {
+	if out, err := execPriv("chown", spec, path); err != nil {
 		res.Output += fmt.Sprintf("; chown failed: %s", strings.TrimSpace(out+" "+err.Error()))
 	}
 }

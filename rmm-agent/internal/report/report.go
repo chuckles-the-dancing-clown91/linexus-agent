@@ -112,3 +112,20 @@ func Cap(s string, max int) string {
 	}
 	return fmt.Sprintf("[... truncated %d bytes ...]\n%s", start, s[start:])
 }
+
+// Refused is the result for a task the agent would not run at all (e.g. its
+// signature did not verify): failed, exit code 1, every planned step skipped.
+func Refused(intent string, steps []nexus.Step, reason string) nexus.Result {
+	out := nexus.Result{
+		Status:   "failed",
+		Error:    Cap(reason, StepErrorCap),
+		Message:  fmt.Sprintf("refused %s: not executed", intent),
+		ExitCode: 1,
+		Output:   Cap("error: "+reason, OutputCap),
+		Steps:    make([]nexus.StepReport, 0, len(steps)),
+	}
+	for _, s := range steps {
+		out.Steps = append(out.Steps, nexus.StepReport{ID: s.ID, Action: s.Action, Status: StepSkipped})
+	}
+	return out
+}

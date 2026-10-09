@@ -17,10 +17,29 @@ import (
 	"github.com/chuckles-the-dancing-clown91/linexus-agent/rmm-agent/internal/nexus"
 )
 
-// Options gates behavior that could take a host down.
+// Options carries what a step needs from the agent around it.
 type Options struct {
+	// AllowDestructive gates behavior that could take a host down.
 	AllowDestructive bool
+	// StateFile is the agent's state file; agent.environment persists there.
+	StateFile string
+	// SendFacts collects and ships a facts report now (agent.facts). It
+	// returns a one-line summary.
+	SendFacts func() (string, error)
 }
+
+// Seams over the host, swapped in tests so executors run against temp dirs
+// and scripted commands instead of the real system.
+var (
+	// execPriv runs argv as root (sudo -n when the agent is not root).
+	execPriv = runPrivileged
+	// execPlain runs a command as the agent.
+	execPlain = runCmd
+	// systemdPresent reports whether systemd is the running init system.
+	systemdPresent = hasSystemd
+	// pkgManager detects the package manager.
+	pkgManager = detectPkgManager
+)
 
 // StepResult is the outcome of executing one step.
 type StepResult struct {
@@ -46,11 +65,23 @@ func ExecuteStep(step nexus.Step, opts Options) StepResult {
 	case "package.ensure":
 		res = ensurePackage(step.Params["name"], step.Params["state"], step.Params["version"])
 	case "service.ensure":
-		res = ensureService(step.Params["name"], step.Params["state"], step.Params["enabled"])
+		res = ensureServiceStep(step.Params)
 	case "file.write":
 		res = writeFile(step.Params["path"], step.Params["content"], step.Params["mode"], step.Params["owner"], step.Params["group"])
 	case "system.reboot", "system.power_off", "system.power_on":
 		res = powerStep(step.Action, opts)
+	case "agent.environment":
+		res = setEnvironment(step.Params, opts)
+	case "agent.facts":
+		res = sendFacts(opts)
+	case "dns.server.ensure":
+		res = ensureDNSServer(bindPaths())
+	case "dns.zone.apply":
+		res = applyZone(bindPaths(), step.Params)
+	case "dns.zone.remove":
+		res = removeZone(bindPaths(), step.Params["zone"])
+	case "disk.mount":
+		res = mountDisk(step.Params)
 	case "role.provision":
 		res = StepResult{
 			OK:     true,

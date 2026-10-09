@@ -1,7 +1,9 @@
 // Package facts collects the host inventory the agent reports to Nexus. It
-// reads native Linux sources (/proc, statfs) rather than shelling out, and
-// degrades to zero/empty values when a source is unavailable so a partial
-// report is always possible.
+// reads native Linux sources (/proc, statfs, net.Interfaces) where it can and
+// shells out only to read-only tools (systemctl, dpkg-query/rpm, named -v)
+// where it must. Every collector is best effort: one that is unavailable or
+// fails yields an empty value (omitted from the report) and never fails the
+// report, so a partial report is always possible.
 package facts
 
 import (
@@ -25,9 +27,20 @@ type Facts struct {
 	DiskGB        int    `json:"diskGb"`
 	AgentVersion  string `json:"agentVersion"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
+
+	// Richer facts (PROVIDERS.md §2). Each is omitted when its collector is
+	// unavailable on this host or found nothing.
+	MachineID  string      `json:"machineId,omitempty"`
+	PublicIP   string      `json:"publicIp,omitempty"`
+	Interfaces []Interface `json:"interfaces,omitempty"`
+	Listening  []Listener  `json:"listening,omitempty"`
+	Services   []Service   `json:"services,omitempty"`
+	Packages   []Package   `json:"packages,omitempty"`
+	DNSServer  *DNSServer  `json:"dnsServer,omitempty"`
 }
 
-// Collect gathers the current host facts.
+// Collect gathers the basic host facts — cheap, native reads only. Used for
+// enrollment.
 func Collect(agentVersion string) Facts {
 	host, _ := os.Hostname()
 	return Facts{
@@ -40,8 +53,38 @@ func Collect(agentVersion string) Facts {
 		DiskGB:        diskGB("/"),
 		AgentVersion:  agentVersion,
 		UptimeSeconds: uptimeSeconds(),
+		MachineID:     MachineID(),
 	}
 }
+
+// CollectFull gathers the basic facts plus the richer inventory: interfaces,
+// public address, listening sockets, services, packages and the DNS server.
+// It never fails; a collector that cannot run leaves its field empty.
+func CollectFull(agentVersion string) Facts {
+	f := Collect(agentVersion)
+	f.Interfaces = Interfaces()
+	f.PublicIP = PublicIPv4(f.Interfaces)
+	f.Listening = Listening()
+	f.Services = Services()
+	f.Packages = Packages()
+	f.DNSServer = DetectDNSServer()
+	return f
+}
+
+// MachineID is the systemd machine id (/etc/machine-id, falling back to the
+// D-Bus copy), which Nexus uses to re-adopt a reinstalled agent.
+func MachineID() string {
+	for _, p := range machineIDPaths {
+		if b, err := os.ReadFile(p); err == nil {
+			if id := strings.TrimSpace(string(b)); id != "" && id != "uninitialized" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+var machineIDPaths = []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}
 
 func osName() string {
 	f, err := os.Open("/etc/os-release")

@@ -3,3 +3,4 @@ target/
 # rmm-agent local state
 rmm-agent/linexus-agent-state.json
 rmm-agent/rmm-agent
+rmm-agent/dist/
