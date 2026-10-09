@@ -1,0 +1,136 @@
+# Release contract v1 (docs/operations/releases.md in daedalus-it): every push
+# to the default branch, and every manual run, publishes a GitHub Release once
+# the tests pass. Version YYYY.MM.DD.<run number> (UTC), tag v<version>.
+#
+# Settings on this repository:
+#   secret RELEASE_SIGNING_KEY  Ed25519 private key, PEM (scripts/release/keygen.sh
+#                               in daedalus-it). Without it the release is unsigned.
+#   nothing else: GITHUB_TOKEN publishes the release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-go:
+    name: rmm-agent — vet, test
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rmm-agent
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: rmm-agent/go.mod
+          cache: false # standard library only: nothing to cache
+      - name: vet and test
+        run: make vet test
+
+  test-rust:
+    name: Tests — edge agent (Rust)
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo test
+        run: cargo test
+
+  release:
+    name: Build, sign and publish
+    needs: [test-go, test-rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    # One release at a time: two pushes never race for a version or a tag. A
+    # waiting run is replaced by a newer one, which releases a later commit.
+    concurrency:
+      group: release-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      PRODUCT: linexus-agent
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # every commit and tag: the notes need them
+
+      - name: Version and notes
+        id: v
+        run: |
+          set -euo pipefail
+          if scripts/release/manifest.sh superseded "$GITHUB_EVENT_NAME"; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(scripts/release/manifest.sh version)
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::tag v$version already exists"
+            exit 1
+          fi
+          prev=$(scripts/release/manifest.sh prev-tag)
+          scripts/release/manifest.sh notes "$prev" >"$RUNNER_TEMP/notes.md"
+          {
+            echo "VERSION=$version"
+            echo "DIST=$RUNNER_TEMP/dist"
+            echo "STAGE=$RUNNER_TEMP/stage"
+          } >>"$GITHUB_ENV"
+          echo "version $version (previous release: ${prev:-none})"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: steps.v.outputs.skip != 'true'
+        with:
+          # Newest stable for what ships; go.mod's go line is the minimum.
+          go-version: stable
+          cache: false
+
+      - name: Build rmm-agent (linux amd64, arm64)
+        if: steps.v.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Static (CGO_ENABLED=0), -trimpath, -s -w: the Makefile's dist target.
+          # The agent's version is a constant in main.go, so there is nothing to -X.
+          make -C rmm-agent dist DIST="$RUNNER_TEMP/bin"
+          mkdir -p "$DIST"
+          for arch in amd64 arm64; do
+            mkdir -p "$STAGE/$arch"
+            install -m 755 "$RUNNER_TEMP/bin/rmm-agent-linux-$arch" "$STAGE/$arch/rmm-agent"
+            scripts/release/manifest.sh pack "$DIST/$PRODUCT-rmm-agent-$VERSION-linux-$arch.tar.gz" "$STAGE/$arch"
+          done
+
+      - name: release.json, SHA256SUMS and signature
+        if: steps.v.outputs.skip != 'true'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          scripts/release/manifest.sh write "$DIST" \
+            --product "$PRODUCT" --version "$VERSION" --commit "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" \
+            --notes-file "$RUNNER_TEMP/notes.md" --migrations false \
+            "binary:rmm-agent:$PRODUCT-rmm-agent-$VERSION-linux-amd64.tar.gz:linux:amd64" \
+            "binary:rmm-agent:$PRODUCT-rmm-agent-$VERSION-linux-arm64.tar.gz:linux:arm64"
+          scripts/release/manifest.sh sums "$DIST"
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY is not set: publishing an unsigned release"
+          fi
+          cat "$DIST/release.json" "$DIST/SHA256SUMS"
+
+      - name: Publish
+        if: steps.v.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" "$DIST"/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$PRODUCT $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --latest
+          echo "Published [$PRODUCT $VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" >>"$GITHUB_STEP_SUMMARY"
