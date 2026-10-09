@@ -2,7 +2,6 @@ package executor
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -12,14 +11,17 @@ import (
 func packageInstalled(pm PkgManager, name string) (bool, string) {
 	switch pm {
 	case PkgApt:
-		out, err := exec.Command("dpkg-query", "-W", "-f=${Version}", name).Output()
+		out, err := execPlain("dpkg-query", "-W", "-f=${Status}\t${Version}", name)
 		if err != nil {
 			return false, ""
 		}
-		v := strings.TrimSpace(string(out))
+		status, v, _ := strings.Cut(strings.TrimSpace(out), "\t")
+		if !strings.HasSuffix(status, " installed") {
+			return false, ""
+		}
 		return v != "", v
 	case PkgDnf:
-		err := exec.Command("rpm", "-q", name).Run()
+		_, err := execPlain("rpm", "-q", name)
 		return err == nil, ""
 	default:
 		return false, ""
@@ -33,7 +35,7 @@ func ensurePackage(name, state, version string) StepResult {
 		res.Err = "package.ensure: missing 'name'"
 		return res
 	}
-	pm := detectPkgManager()
+	pm := pkgManager()
 	if pm == PkgUnknown {
 		res.OK = false
 		res.Err = "package.ensure: no supported package manager (apt/dnf) found"
@@ -84,13 +86,21 @@ func installPackage(pm PkgManager, name, version string) (string, error) {
 		if version != "" {
 			pkg = name + "=" + version
 		}
-		return runPrivileged("apt-get", "install", "-y", pkg)
+		out, err := execPriv("apt-get", "install", "-y", pkg)
+		if err != nil && (strings.Contains(out, "Unable to locate package") || strings.Contains(out, "has no installation candidate")) {
+			// A fresh host often has no package lists yet: refresh once and retry.
+			if uout, uerr := execPriv("apt-get", "update"); uerr != nil {
+				return out + "\n" + uout, err
+			}
+			return execPriv("apt-get", "install", "-y", pkg)
+		}
+		return out, err
 	case PkgDnf:
 		pkg := name
 		if version != "" {
 			pkg = name + "-" + version
 		}
-		return runPrivileged("dnf", "install", "-y", pkg)
+		return execPriv("dnf", "install", "-y", pkg)
 	default:
 		return "", fmt.Errorf("unsupported package manager")
 	}
@@ -99,9 +109,9 @@ func installPackage(pm PkgManager, name, version string) (string, error) {
 func removePackage(pm PkgManager, name string) (string, error) {
 	switch pm {
 	case PkgApt:
-		return runPrivileged("apt-get", "remove", "-y", name)
+		return execPriv("apt-get", "remove", "-y", name)
 	case PkgDnf:
-		return runPrivileged("dnf", "remove", "-y", name)
+		return execPriv("dnf", "remove", "-y", name)
 	default:
 		return "", fmt.Errorf("unsupported package manager")
 	}

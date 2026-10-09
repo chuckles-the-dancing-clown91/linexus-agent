@@ -2,3 +2,4 @@ rmm-agent
 linexus-agent-state.json
 *.json
 .git/
+dist/

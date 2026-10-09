@@ -6,23 +6,28 @@ package nexus
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 )
 
 type Client struct {
 	baseURL string
-	token   string
 	hc      *http.Client
+
+	mu    sync.RWMutex
+	token string
 }
 
 // New builds a client. The transport disables proxying: the agent reaches Nexus
 // directly (LAN/VPN), never through an outbound web proxy.
 func New(baseURL, token string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		hc: &http.Client{
 			Timeout:   15 * time.Second,
@@ -31,11 +36,69 @@ func New(baseURL, token string) *Client {
 	}
 }
 
-// Agent is the record Nexus returns on enroll.
+// SetToken replaces the bearer presented on every later call (the per-agent
+// credential once enrolled).
+func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	c.token = token
+	c.mu.Unlock()
+}
+
+func (c *Client) bearer() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
+}
+
+// HTTPError is a non-2xx answer from Nexus.
+type HTTPError struct {
+	Method, Path string
+	Status       int
+	Body         string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("nexus %s %s -> %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
+// IsUnauthorized reports whether err is Nexus refusing the credential (401):
+// a revoked or rotated agent token, a deleted agent, or a spent enrollment
+// token.
+func IsUnauthorized(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusUnauthorized
+}
+
+// EnrollRequest is the body of POST /api/v1/agents/enroll. With an
+// EnrollmentToken the call carries no bearer; without one it is the legacy
+// path, authenticated by a system key in the bearer.
+type EnrollRequest struct {
+	Hostname        string `json:"hostname"`
+	Hostgroup       string `json:"hostgroup,omitempty"`
+	MachineID       string `json:"machineId,omitempty"`
+	EnrollmentToken string `json:"enrollmentToken,omitempty"`
+}
+
+// Agent is the record Nexus returns on enroll. A Nexus that issues per-agent
+// credentials answers agentId + agentToken; an older one answers only id.
 type Agent struct {
-	ID       string `json:"id"`
-	Hostname string `json:"hostname"`
-	State    string `json:"state"`
+	AgentID           string `json:"agentId"`
+	ID                string `json:"id"`
+	Hostname          string `json:"hostname"`
+	Hostgroup         string `json:"hostgroup"`
+	Environment       string `json:"environment"`
+	State             string `json:"state"`
+	AgentToken        string `json:"agentToken"`
+	EnrollmentTokenID string `json:"enrollmentTokenId"`
+	Readopted         bool   `json:"readopted"`
+}
+
+// Identity is the agent id, whichever field carried it.
+func (a Agent) Identity() string {
+	if a.AgentID != "" {
+		return a.AgentID
+	}
+	return a.ID
 }
 
 // Step is one executable action in a plan.
@@ -73,6 +136,10 @@ type LogEntry struct {
 }
 
 func (c *Client) do(method, path string, body, out any) error {
+	return c.doAuth(method, path, c.bearer(), body, out)
+}
+
+func (c *Client) doAuth(method, path, token string, body, out any) error {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -86,8 +153,8 @@ func (c *Client) do(method, path string, body, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -96,7 +163,7 @@ func (c *Client) do(method, path string, body, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("nexus %s %s -> %d: %s", method, path, resp.StatusCode, string(b))
+		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -104,17 +171,19 @@ func (c *Client) do(method, path string, body, out any) error {
 	return nil
 }
 
-// Enroll registers this machine and returns its assigned record.
-func (c *Client) Enroll(hostname, hostgroup, manifest string) (Agent, error) {
-	body := map[string]any{"hostname": hostname}
-	if hostgroup != "" {
-		body["hostgroup"] = hostgroup
-	}
-	if manifest != "" {
-		body["capabilityManifest"] = manifest
+// Enroll registers this machine and returns its assigned record. With an
+// enrollment token in the request no bearer is sent (the token is the
+// credential); otherwise the client's current token (a system key) is.
+func (c *Client) Enroll(req EnrollRequest) (Agent, error) {
+	token := c.bearer()
+	if req.EnrollmentToken != "" {
+		token = ""
 	}
 	var a Agent
-	err := c.do(http.MethodPost, "/api/v1/agents/enroll", body, &a)
+	err := c.doAuth(http.MethodPost, "/api/v1/agents/enroll", token, req, &a)
+	if err == nil && a.Identity() == "" {
+		err = fmt.Errorf("nexus enroll: answer carried no agent id")
+	}
 	return a, err
 }
 

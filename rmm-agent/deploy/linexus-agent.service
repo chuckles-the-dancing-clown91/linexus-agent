@@ -1,0 +1,35 @@
+# Linexus infrastructure agent.
+#
+# Installed by Nexus's install script (GET $NEXUS_PUBLIC_URL/install/agent.sh)
+# as /etc/systemd/system/linexus-agent.service. Configuration lives in
+# /etc/linexus/agent.env (NEXUS_URL, ENROLLMENT_TOKEN, AGENT_STATE_FILE, …);
+# the agent's identity and per-agent credential in
+# /var/lib/linexus/agent-state.json (0600).
+#
+# The agent runs as root on purpose: managing packages, services, BIND and
+# mounts is its job. Destructive power actions stay off unless
+# AGENT_ALLOW_DESTRUCTIVE=1 is set in agent.env.
+[Unit]
+Description=Linexus infrastructure agent
+Documentation=https://github.com/chuckles-the-dancing-clown91/linexus-agent/tree/main/rmm-agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/linexus/agent.env
+Environment=AGENT_STATE_FILE=/var/lib/linexus/agent-state.json
+ExecStart=/usr/local/bin/linexus-agent
+# Creates /var/lib/linexus (0700) for the state file.
+StateDirectory=linexus
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/linexus
+UMask=0022
+Restart=always
+RestartSec=10
+# Let a task finish reporting before a restart kills it.
+TimeoutStopSec=30
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

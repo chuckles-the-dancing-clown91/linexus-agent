@@ -75,3 +75,74 @@ func TestSendResultAlwaysSendsStepsArray(t *testing.T) {
 		t.Errorf("exitCode = %#v, want 0", got["exitCode"])
 	}
 }
+
+func TestEnrollWithTokenSendsNoBearer(t *testing.T) {
+	var gotAuth string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"agentId":"a9","id":"a9","hostname":"h","hostgroup":"acme","environment":"production","agentToken":"nxa_t","enrollmentTokenId":"e1","readopted":false}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "system-key")
+	a, err := c.Enroll(EnrollRequest{Hostname: "h", Hostgroup: "x", MachineID: "m1", EnrollmentToken: "nxe_abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "" {
+		t.Errorf("bearer sent with an enrollment token: %q", gotAuth)
+	}
+	for k, want := range map[string]any{"hostname": "h", "hostgroup": "x", "machineId": "m1", "enrollmentToken": "nxe_abc"} {
+		if got[k] != want {
+			t.Errorf("%s = %#v, want %#v", k, got[k], want)
+		}
+	}
+	if a.Identity() != "a9" || a.AgentToken != "nxa_t" || a.EnrollmentTokenID != "e1" {
+		t.Errorf("agent = %+v", a)
+	}
+}
+
+func TestLegacyEnrollUsesBearerAndOldAnswer(t *testing.T) {
+	var gotAuth string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"id":"old-1","hostname":"h","state":"healthy"}`))
+	}))
+	defer srv.Close()
+
+	a, err := New(srv.URL, "system-key").Enroll(EnrollRequest{Hostname: "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer system-key" {
+		t.Errorf("auth = %q", gotAuth)
+	}
+	if _, ok := got["enrollmentToken"]; ok {
+		t.Error("empty enrollmentToken should be omitted")
+	}
+	if a.Identity() != "old-1" || a.AgentToken != "" {
+		t.Errorf("agent = %+v", a)
+	}
+}
+
+func TestUnauthorizedIsDetectable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "nxa_old")
+	err := c.Heartbeat("a1")
+	if !IsUnauthorized(err) {
+		t.Fatalf("err = %v, want unauthorized", err)
+	}
+	c.SetToken("nxa_new")
+	if c.bearer() != "nxa_new" {
+		t.Error("SetToken did not take")
+	}
+}
